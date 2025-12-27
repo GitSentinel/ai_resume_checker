@@ -1,91 +1,68 @@
+"use client";
+
 export interface PdfConversionResult {
     imageUrl: string;
     file: File | null;
     error?: string;
 }
 
-let pdfLib: any;
-let pendingLoad: Promise<any> | null = null;
-
-const getPdfLib = async (): Promise<any> => {
-    if (pdfLib) return pdfLib;
-    if (!pendingLoad) {
-        // @ts-expect-error
-        pendingLoad = import("pdfjs-dist/build/pdf.mjs").then((m) => {
-            m.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-            pdfLib = m;
-            return m;
-        });
+export async function convertPdfToImage(
+    file: File
+): Promise<PdfConversionResult> {
+    if (typeof window === "undefined") {
+        return { imageUrl: "", file: null, error: "SSR environment" };
     }
-    return pendingLoad;
-};
 
-const renderFirstPage = async (
-    lib: any,
-    buffer: ArrayBuffer,
-    scale: number
-): Promise<HTMLCanvasElement> => {
-    const doc = await lib.getDocument({ data: buffer }).promise;
-    const page = await doc.getPage(1);
+    try {
+        const pdfjsLib = await import("pdfjs-dist");
+        const worker = await import(
+            "pdfjs-dist/build/pdf.worker.min.mjs?url"
+        );
 
-    const view = page.getViewport({ scale });
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d")!;
+        pdfjsLib.GlobalWorkerOptions.workerSrc = worker.default;
 
-    canvas.width = view.width;
-    canvas.height = view.height;
+        const buffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+        const page = await pdf.getPage(1);
 
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
+        const viewport = page.getViewport({ scale: 2 });
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
 
-    await page.render({ canvasContext: ctx, viewport: view }).promise;
-    return canvas;
-};
+        if (!ctx) {
+            return { imageUrl: "", file: null, error: "Canvas unavailable" };
+        }
 
-const canvasToResult = (
-    canvas: HTMLCanvasElement,
-    source: File
-): Promise<PdfConversionResult> =>
-    new Promise((resolve) => {
-        canvas.toBlob(
-            (blob) => {
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+
+        await page.render({
+            canvas,
+            canvasContext: ctx,
+            viewport,
+        }).promise;
+
+        return await new Promise((resolve) => {
+            canvas.toBlob((blob) => {
                 if (!blob) {
-                    resolve({
-                        imageUrl: "",
-                        file: null,
-                        error: "Image generation failed",
-                    });
+                    resolve({ imageUrl: "", file: null, error: "Blob failed" });
                     return;
                 }
 
-                const baseName = source.name.replace(/\.pdf$/i, "");
-                const output = new File([blob], `${baseName}.png`, {
-                    type: "image/png",
-                });
+                const imageFile = new File(
+                    [blob],
+                    file.name.replace(/\.pdf$/i, ".png"),
+                    { type: "image/png" }
+                );
 
                 resolve({
                     imageUrl: URL.createObjectURL(blob),
-                    file: output,
+                    file: imageFile,
                 });
-            },
-            "image/png",
-            1
-        );
-    });
-
-export const convertPdfToImage = async (
-    file: File
-): Promise<PdfConversionResult> => {
-    try {
-        const lib = await getPdfLib();
-        const buffer = await file.arrayBuffer();
-        const canvas = await renderFirstPage(lib, buffer, 4);
-        return await canvasToResult(canvas, file);
-    } catch (e) {
-        return {
-            imageUrl: "",
-            file: null,
-            error: `Failed to convert PDF: ${e}`,
-        };
+            });
+        });
+    } catch (err) {
+        console.error("PDF conversion error:", err);
+        return { imageUrl: "", file: null, error: "Conversion failed" };
     }
-};
+}
